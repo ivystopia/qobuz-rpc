@@ -1,88 +1,72 @@
 import time
-from pypresence import Presence
-
+import ctypes
+import psutil
 import win32gui
 import win32process
+from pypresence import Presence
 
-import psutil
-import ctypes
+class Qobuz:
+    def __init__(self, process_name="Qobuz.exe"):
+        self.process_name = process_name
 
-EnumWindows = ctypes.windll.user32.EnumWindows
-EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
-GetWindowText = ctypes.windll.user32.GetWindowTextW
-GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
-IsWindowVisible = ctypes.windll.user32.IsWindowVisible
+    def running_pids(self):
+        """Generator that yields PIDs for all running instances of Qobuz."""
+        for proc in psutil.process_iter(['name']):
+            if proc.info['name'] == self.process_name:
+                yield proc.pid
 
-client_id = "928957672907227147"
+    def visible_windows(self, pid):
+        """Generator that yields handles to all visible windows for a given PID."""
+        def callback(hwnd, hwnds):
+            _, win_pid = win32process.GetWindowThreadProcessId(hwnd)
+            if win_pid == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
+                hwnds.append(hwnd)
+            return True
 
-def getProcessIDByName():
-    qobuz_pids = []
-    process_name = "Qobuz.exe"
-
-    for proc in psutil.process_iter():
-        if process_name in proc.name():
-            qobuz_pids.append(proc.pid)
-
-    return qobuz_pids
-
-def get_hwnds_for_pid(pid):
-    def callback(hwnd, hwnds):
-        #if win32gui.IsWindowVisible(hwnd) and win32gui.IsWindowEnabled(hwnd):
-        _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
-
-        if found_pid == pid:
-            hwnds.append(hwnd)
-        return True
-    hwnds = []
-    win32gui.EnumWindows(callback, hwnds)
-    return hwnds 
-
-def getWindowTitleByHandle(hwnd):
-    length = GetWindowTextLength(hwnd)
-    buff = ctypes.create_unicode_buffer(length + 1)
-    GetWindowText(hwnd, buff, length + 1)
-    return buff.value
-
-def getQobuzHandle():
-    pids = getProcessIDByName()
-
-    for i in pids:
-        hwnds = get_hwnds_for_pid(i)
+        hwnds = []
+        win32gui.EnumWindows(callback, hwnds)
         for hwnd in hwnds:
-            if IsWindowVisible(hwnd):
-                return hwnd
+            yield hwnd
+
+    def get_titles(self, hwnd):
+        """Retrieve the window title from a window handle."""
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buff = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+        return buff.value
+
+    def get_valid_titles(self):
+        """Generator that yields valid titles from all visible windows of running Qobuz processes."""
+        for pid in self.running_pids():
+            for hwnd in self.visible_windows(pid):
+                title = self.get_titles(hwnd)
+                if title and " - " in title and title != "Qobuz":
+                    yield title
 
 
-if __name__ == '__main__':
-    qobuz_handle = getQobuzHandle()
+class DiscordRPC:
+    def __init__(self, client_id="928957672907227147"):
+        self.rpc = Presence(client_id)
+        self.rpc.connect()
+        self.current_song = {}
 
-    if qobuz_handle is None:
-        while True:
-            qobuz_handle = getQobuzHandle()
-            if qobuz_handle is not None:
-                break
+    def update_presence(self, song):
+        if song != self.current_song:
+            self.rpc.update(details=song['title'], state=f"by {song['artist']}", large_image="qobuz")
+            print(f"Updated: {song['title']} - by {song['artist']}")
+            self.current_song = song
+        elif not song or song['title'] == "Qobuz":
+            self.rpc.clear()
+            print("Cleared Discord presence due to lack of title or default title.")
 
-    RPC = Presence(client_id)
-
-    RPC.connect()
-
-    title = ""
-
+def main():
+    qobuz = Qobuz()
+    discord = DiscordRPC()
     while True:
-        while True:
-            new_title = getWindowTitleByHandle(qobuz_handle)
+        for title in qobuz.get_valid_titles():
+            details, state = title.split(" - ", 1)
+            discord.update_presence({'title': details, 'artist': state})
+        time.sleep(5)
 
-            if title != new_title:
-                title = new_title
-                break
-
-        if title == 'Qobuz':
-            print('resetting')
-            RPC.clear()
-        else:
-            try:
-                title_parts = title.rsplit(' - ', 1)
-                print(title_parts)
-                RPC.update(details=title_parts[0], state="by " + title_parts[1], large_image="qobuz")
-            except:
-                print("split not worked")
+if __name__ == "__main__":
+    main()
